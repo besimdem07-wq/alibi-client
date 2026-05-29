@@ -476,10 +476,41 @@ function ScoreBar({ penalties, total, color }) {
 // =============================================================
 
 // ── LOBBY ────────────────────────────────────────────────────
-// Trois vues : ACCUEIL → HOST (crée) | JOUEUR (rejoint)
+// Nouveau flux : nom seulement → rôles attribués automatiquement
+// HOST : crée + voit les gens arriver + mélange les équipes
+// JOUEUR : code + prénom → attente
 // ─────────────────────────────────────────────────────────────
 
-// Sous-écran : Accueil — choisir HOST ou rejoindre
+// Utilitaire : mélanger un tableau (Fisher-Yates)
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// Attribution des rôles : N noms → joueurs avec role + team
+function assignRoles(names, mode) {
+  const shuffled = shuffle(names);
+  if (mode === "2P") {
+    return [
+      { name: shuffled[0], role: "A", team: 1 },
+      { name: shuffled[1], role: "B", team: 1 },
+    ];
+  } else {
+    // 4P : équipes aléatoires
+    return [
+      { name: shuffled[0], role: "A", team: 1 },
+      { name: shuffled[1], role: "B", team: 1 },
+      { name: shuffled[2], role: "A", team: 2 },
+      { name: shuffled[3], role: "B", team: 2 },
+    ];
+  }
+}
+
+// Accueil
 function LobbyHome({ game, onHost, onJoin }) {
   return (
     <div className="screen">
@@ -496,11 +527,7 @@ function LobbyHome({ game, onHost, onJoin }) {
             🔑 REJOINDRE AVEC UN CODE
           </button>
         </div>
-        {!game.connected && (
-          <div style={{ marginTop:"2rem", fontSize:"0.65rem", color:"var(--muted)" }}>
-            Connexion au serveur<span className="loading-dots"/>
-          </div>
-        )}
+        {!game.connected && <div style={{ marginTop:"2rem", fontSize:"0.65rem", color:"var(--muted)" }}>Connexion au serveur<span className="loading-dots"/></div>}
         <div style={{ marginTop:"3rem", fontSize:"0.6rem", color:"var(--muted)", letterSpacing:"0.1em" }}>
           Inventez votre alibi. Espérez que l'autre en fasse autant.
         </div>
@@ -509,36 +536,37 @@ function LobbyHome({ game, onHost, onJoin }) {
   );
 }
 
-// Sous-écran : HOST — configure et attend les joueurs
+// HOST — attend les noms, mélange, lance
 function LobbyHost({ game, onBack }) {
-  const [mode, setMode]     = useState("2P");
-  const [roomId, setRoomId] = useState(null);
-  const [creating, setCreating] = useState(false);
-  const [error, setError]   = useState("");
+  const [mode, setMode]       = useState("2P");
+  const [roomId, setRoomId]   = useState(null);
+  const [error, setError]     = useState("");
   const [launched, setLaunched] = useState(false);
+  const [assignment, setAssignment] = useState(null); // après mélange
 
-  const lobbyPlayers = game.lobbyPlayers || [];
   const count = mode === "4P" ? 4 : 2;
-  const ready = lobbyPlayers.length === count;
+  // Tous les joueurs connectés (sauf HOST/OBSERVER internes)
+  const arrivedNames = (game.lobbyPlayers || [])
+    .filter(p => p.name !== "HOST" && p.name !== "__OBSERVER__")
+    .map(p => p.name);
+  const ready = arrivedNames.length === count;
 
-  // Créer la room dès que le host ouvre cet écran
+  // Créer la room au montage
   useEffect(() => {
     (async () => {
       try {
         const id = await game.createRoom(mode);
         setRoomId(id);
-        // Le host lui-même rejoint comme HOST (sans rôle joueur)
         await game.joinRoom({ roomId: id, playerName:"HOST", role:"A", team:1, clientRole:"HOST" });
-      } catch(e) {
-        setError(e.message);
-      }
+      } catch(e) { setError(e.message); }
     })();
   }, []);
 
-  // Recréer la room si le mode change (avant que des joueurs rejoignent)
+  // Recréer la room si mode change (sans joueurs)
   const changeMode = async (m) => {
-    if (lobbyPlayers.filter(p=>p.name!=="HOST").length > 0) return; // trop tard
+    if (arrivedNames.length > 0) return;
     setMode(m);
+    setAssignment(null);
     try {
       const id = await game.createRoom(m);
       setRoomId(id);
@@ -546,30 +574,40 @@ function LobbyHost({ game, onBack }) {
     } catch(e) { setError(e.message); }
   };
 
+  // Mélanger les équipes
+  const shuffle_teams = () => {
+    if (!ready) return;
+    setAssignment(assignRoles(arrivedNames, mode));
+  };
+
+  // Lancer la partie
   const launch = async () => {
-    if (!roomId) return;
+    if (!roomId || !ready) return;
     setLaunched(true);
+    // Utiliser l'attribution actuelle ou en créer une au hasard
+    const finalAssignment = assignment || assignRoles(arrivedNames, mode);
     try {
+      // Re-joindre chaque joueur avec son rôle assigné
+      for (const p of finalAssignment) {
+        await game.joinRoom({ roomId, playerName: p.name, role: p.role, team: p.team, clientRole: `PLAYER_${p.role}` });
+      }
       await game.startGame({ roomId, mode });
     } catch(e) { setError(e.message); setLaunched(false); }
   };
 
-  const teamColor = (team) => team===1 ? "var(--team1)" : "var(--team2)";
-
-  const realPlayers = lobbyPlayers.filter(p => p.name !== "HOST");
+  const TEAM_C = { 1:"var(--team1)", 2:"var(--team2)" };
 
   return (
     <div className="screen" style={{ padding:"2rem" }}>
       <ConnBadge connected={game.connected} connecting={game.connecting}/>
       <div style={{ width:"100%", maxWidth:460, animation:"fadeUp 0.6s ease" }}>
 
-        {/* Header */}
         <div style={{ display:"flex", alignItems:"center", gap:"1rem", marginBottom:"2rem" }}>
           <button className="btn btn-ghost" style={{ padding:"0.4em 0.8em", fontSize:"0.65rem" }} onClick={onBack}>←</button>
           <Logo size="sm"/>
         </div>
 
-        {/* Code de la salle */}
+        {/* Code */}
         <div className="dossier" style={{ padding:"1.5rem 2rem", marginBottom:"1.5rem" }}>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
             <div>
@@ -592,8 +630,8 @@ function LobbyHost({ game, onBack }) {
             {[["2P","👥 Duo"],["4P","⚔️ 2v2"]].map(([m,label]) => (
               <button key={m} onClick={()=>changeMode(m)} className="btn" style={{
                 flex:1, padding:"0.6rem",
-                background: mode===m ? "var(--ink)" : "transparent",
-                color: mode===m ? "var(--paper)" : "var(--muted)",
+                background:mode===m?"var(--ink)":"transparent",
+                color:mode===m?"var(--paper)":"var(--muted)",
                 border:`1px solid ${mode===m?"var(--ink)":"rgba(240,236,226,0.15)"}`,
                 fontSize:"0.7rem", letterSpacing:"0.1em",
               }}>{label}</button>
@@ -601,84 +639,90 @@ function LobbyHost({ game, onBack }) {
           </div>
         </div>
 
-        {/* Joueurs connectés — temps réel */}
-        <div style={{ marginBottom:"2rem" }}>
+        {/* Joueurs qui arrivent */}
+        <div style={{ marginBottom:"1.5rem" }}>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"0.8rem" }}>
             <div className="field-label" style={{ color:"var(--muted)" }}>Joueurs connectés</div>
-            <div style={{ fontSize:"0.65rem", color: ready?"var(--green-light)":"var(--muted)" }}>
-              {realPlayers.length}/{count} {ready?"✓ PRÊTS":"en attente..."}
+            <div style={{ fontSize:"0.65rem", color:ready?"var(--green-light)":"var(--muted)" }}>
+              {arrivedNames.length}/{count} {ready?"✓ PRÊTS":"en attente..."}
             </div>
           </div>
-
-          {/* Slots */}
-          {[
-            {team:1,role:"A",hint:"Témoigne en premier"},
-            {team:1,role:"B",hint:"S'isole pendant A"},
-            ...(mode==="4P"?[{team:2,role:"A",hint:"Témoigne en premier"},{team:2,role:"B",hint:"S'isole pendant A"}]:[]),
-          ].map((slot, i) => {
-            const joined = realPlayers.find(p => p.role===slot.role && p.team===slot.team);
-            return (
-              <div key={i} style={{
-                display:"flex", alignItems:"center", gap:"0.8rem",
-                padding:"0.7rem 1rem", marginBottom:"0.4rem",
-                background: joined ? "rgba(39,174,96,0.08)" : "rgba(240,236,226,0.03)",
-                border:`1px solid ${joined?"rgba(39,174,96,0.3)":"rgba(240,236,226,0.08)"}`,
-                borderRadius:"2px", transition:"all 0.3s",
-              }}>
-                {/* Indicateur connexion */}
-                <div style={{
-                  width:8, height:8, borderRadius:"50%", flexShrink:0,
-                  background: joined ? "var(--green-light)" : "rgba(240,236,226,0.2)",
-                  boxShadow: joined ? "0 0 6px rgba(46,204,113,0.6)" : "none",
-                  transition:"all 0.3s",
-                }}/>
-                <div style={{ flex:1 }}>
-                  <div style={{ display:"flex", alignItems:"center", gap:"0.4rem" }}>
-                    {mode==="4P" && <span style={{ background:teamColor(slot.team), color:"white", fontFamily:"Bebas Neue", fontSize:"0.6rem", padding:"0 0.3rem", borderRadius:"1px" }}>E{slot.team}</span>}
-                    <span style={{ fontFamily:"Bebas Neue", fontSize:"0.9rem", letterSpacing:"0.1em" }}>Suspect {slot.role}</span>
-                    <span style={{ fontSize:"0.6rem", color:"var(--muted)" }}>— {slot.hint}</span>
+          <div style={{ display:"flex", flexDirection:"column", gap:"0.4rem" }}>
+            {Array.from({length:count}).map((_,i) => {
+              const name = arrivedNames[i];
+              return (
+                <div key={i} style={{
+                  display:"flex", alignItems:"center", gap:"0.8rem",
+                  padding:"0.7rem 1rem",
+                  background:name?"rgba(39,174,96,0.08)":"rgba(240,236,226,0.03)",
+                  border:`1px solid ${name?"rgba(39,174,96,0.3)":"rgba(240,236,226,0.08)"}`,
+                  borderRadius:"2px", transition:"all 0.3s",
+                }}>
+                  <div style={{ width:8, height:8, borderRadius:"50%", flexShrink:0,
+                    background:name?"var(--green-light)":"rgba(240,236,226,0.2)",
+                    boxShadow:name?"0 0 6px rgba(46,204,113,0.6)":"none", transition:"all 0.3s" }}/>
+                  <div style={{ flex:1 }}>
+                    {name
+                      ? <span style={{ fontFamily:"Bebas Neue", fontSize:"0.95rem" }}>{name}</span>
+                      : <span style={{ fontSize:"0.6rem", color:"var(--muted)", letterSpacing:"0.1em", animation:"blink 1.4s ease infinite" }}>EN ATTENTE</span>}
                   </div>
-                  {joined && <div style={{ fontSize:"0.75rem", color:"var(--green-light)", marginTop:"0.1rem" }}>{joined.name}</div>}
                 </div>
-                {!joined && (
-                  <div style={{ fontSize:"0.55rem", color:"var(--muted)", letterSpacing:"0.1em", animation:"blink 1.4s ease infinite" }}>
-                    EN ATTENTE
-                  </div>
-                )}
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
+
+        {/* Attribution des rôles — visible quand tout le monde est là */}
+        {ready && (
+          <div style={{ marginBottom:"1.5rem", animation:"fadeUp 0.4s ease" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"0.8rem" }}>
+              <div className="field-label" style={{ color:"var(--muted)" }}>Attribution des rôles</div>
+              <button className="tts-speak-btn" onClick={shuffle_teams} style={{ fontSize:"0.6rem" }}>
+                🔀 MÉLANGER
+              </button>
+            </div>
+            <div style={{ display:"flex", flexDirection:"column", gap:"0.3rem" }}>
+              {(assignment || assignRoles(arrivedNames, mode)).map((p,i) => (
+                <div key={i} style={{
+                  display:"flex", alignItems:"center", gap:"0.6rem",
+                  padding:"0.5rem 0.8rem",
+                  background:"rgba(240,236,226,0.05)",
+                  border:"1px solid rgba(240,236,226,0.1)",
+                  borderRadius:"2px",
+                }}>
+                  {mode==="4P" && <span style={{ background:TEAM_C[p.team], color:"white", fontFamily:"Bebas Neue", fontSize:"0.6rem", padding:"0 0.3rem", borderRadius:"1px" }}>E{p.team}</span>}
+                  <span style={{ fontFamily:"Bebas Neue", fontSize:"0.85rem", letterSpacing:"0.05em" }}>Suspect {p.role}</span>
+                  <span style={{ flex:1, textAlign:"right", fontSize:"0.8rem", color:"var(--gold-light)" }}>{p.name}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {error && <div style={{ marginBottom:"1rem", color:"var(--red-light)", fontSize:"0.7rem" }}>⚠ {error}</div>}
 
         <button className="btn btn-primary" style={{ width:"100%" }}
           disabled={!ready || launched || !roomId}
           onClick={launch}>
-          {launched ? <span className="loading-dots">DÉMARRAGE</span> : `LANCER L'ENQUÊTE (${realPlayers.length}/${count}) →`}
+          {launched
+            ? <span className="loading-dots">DÉMARRAGE</span>
+            : ready ? "LANCER L'ENQUÊTE →" : `EN ATTENTE (${arrivedNames.length}/${count})`}
         </button>
-
-        {!ready && (
-          <div style={{ textAlign:"center", marginTop:"1rem", fontSize:"0.6rem", color:"var(--muted)" }}>
-            En attente de {count - realPlayers.length} joueur{count-realPlayers.length>1?"s":""} supplémentaire{count-realPlayers.length>1?"s":""}
-          </div>
-        )}
       </div>
     </div>
   );
 }
 
-// Sous-écran : JOUEUR — entre le code et choisit son rôle
+// JOUEUR — entre le code + son prénom, c'est tout
 function LobbyJoin({ game, onBack }) {
-  const [code, setCode]     = useState("");
-  const [name, setName]     = useState("");
-  const [role, setRole]     = useState(null);   // {role, team}
-  const [step, setStep]     = useState("code"); // "code" | "role" | "waiting"
+  const [step, setStep]   = useState("code"); // "code" | "name" | "waiting"
+  const [code, setCode]   = useState("");
+  const [name, setName]   = useState("");
   const [joining, setJoining] = useState(false);
-  const [error, setError]   = useState("");
-  const [roomInfo, setRoomInfo] = useState(null); // { mode, playerCount }
+  const [error, setError] = useState("");
+  const [roomInfo, setRoomInfo] = useState(null);
 
-  const lobbyPlayers = game.lobbyPlayers || [];
+  const lobbyPlayers = (game.lobbyPlayers || []).filter(p => p.name !== "HOST" && p.name !== "__OBSERVER__");
 
   // Vérifier le code
   const checkCode = async () => {
@@ -689,41 +733,26 @@ function LobbyJoin({ game, onBack }) {
       if (!res.ok) { setError("Code invalide ou salle introuvable."); return; }
       const info = await res.json();
       setRoomInfo(info);
-      // Rejoindre la room socket pour recevoir lobby:update
-      await game.joinRoom({ roomId: code.trim().toUpperCase(), playerName:"__OBSERVER__", role:"A", team:1, clientRole:"SPECTATOR" });
-      setStep("role");
-    } catch(e) {
-      setError("Impossible de vérifier le code.");
-    }
+      // Rejoindre en spectateur pour recevoir les lobby:update
+      await game.joinRoom({ roomId:code.trim().toUpperCase(), playerName:"__OBSERVER__", role:"B", team:1, clientRole:"SPECTATOR" });
+      setStep("name");
+    } catch { setError("Impossible de vérifier le code."); }
   };
 
-  // Slots disponibles selon le mode
-  const allSlots = roomInfo?.mode === "4P"
-    ? [{role:"A",team:1},{role:"B",team:1},{role:"A",team:2},{role:"B",team:2}]
-    : [{role:"A",team:1},{role:"B",team:1}];
-
-  const takenSlots = lobbyPlayers
-    .filter(p => p.name !== "HOST" && p.name !== "__OBSERVER__")
-    .map(p => `${p.role}-${p.team}`);
-
-  const confirmRole = async () => {
-    if (!role || !name.trim()) return;
+  // Confirmer le nom — pas de choix de rôle, le HOST attribue
+  const confirmName = async () => {
+    if (!name.trim() || joining) return;
     setJoining(true);
     setError("");
     try {
       const roomId = code.trim().toUpperCase();
-      await game.joinRoom({ roomId, playerName:name.trim(), role:role.role, team:role.team, clientRole:`PLAYER_${role.role}` });
+      // Rejoindre avec un rôle temporaire "B" — le HOST réassignera les rôles au lancement
+      await game.joinRoom({ roomId, playerName:name.trim(), role:"B", team:1, clientRole:"PLAYER_B" });
       game.patch({ roomId });
       setStep("waiting");
-    } catch(e) {
-      setError(e.message);
-    } finally {
-      setJoining(false);
-    }
+    } catch(e) { setError(e.message); }
+    finally { setJoining(false); }
   };
-
-  const mySlotKey = role ? `${role.role}-${role.team}` : null;
-  const waitingForHost = step === "waiting";
 
   return (
     <div className="screen" style={{ padding:"2rem" }}>
@@ -742,112 +771,67 @@ function LobbyJoin({ game, onBack }) {
               <div className="field-label" style={{ marginBottom:"0.6rem" }}>Code de la salle</div>
               <input className="field"
                 style={{ fontSize:"2rem", letterSpacing:"0.4em", fontFamily:"Bebas Neue", textTransform:"uppercase" }}
-                placeholder="A3F2"
-                maxLength={4}
+                placeholder="A3F2" maxLength={4}
                 value={code}
                 onChange={e=>setCode(e.target.value.toUpperCase())}
                 onKeyDown={e=>e.key==="Enter"&&checkCode()}
-                autoFocus
-              />
+                autoFocus/>
             </div>
             {error && <div style={{ marginBottom:"1rem", color:"var(--red-light)", fontSize:"0.7rem" }}>⚠ {error}</div>}
             <button className="btn btn-primary" style={{ width:"100%" }}
-              disabled={code.trim().length<4 || !game.connected}
-              onClick={checkCode}>
+              disabled={code.trim().length<4||!game.connected} onClick={checkCode}>
               VÉRIFIER →
             </button>
           </div>
         )}
 
-        {/* ÉTAPE 2 : Choisir un rôle */}
-        {step === "role" && (
+        {/* ÉTAPE 2 : Prénom seulement */}
+        {step === "name" && (
           <div style={{ animation:"fadeUp 0.4s ease" }}>
-            <div style={{ marginBottom:"0.5rem" }}>
+            <div style={{ marginBottom:"0.8rem" }}>
               <div style={{ fontSize:"0.6rem", letterSpacing:"0.2em", color:"var(--muted)", marginBottom:"0.3rem" }}>SALLE</div>
               <div className="room-code" style={{ fontSize:"2rem" }}>{code.toUpperCase()}</div>
             </div>
-
-            <div style={{ marginBottom:"1.5rem", marginTop:"1.5rem" }}>
-              <div className="field-label" style={{ marginBottom:"0.6rem" }}>Votre nom</div>
-              <input className="field" placeholder="Entrez votre nom..." value={name}
-                onChange={e=>setName(e.target.value)} autoFocus/>
-            </div>
-
-            <div style={{ marginBottom:"1.5rem" }}>
-              <div className="field-label" style={{ marginBottom:"0.8rem" }}>Choisissez votre rôle</div>
-              <div style={{ display:"flex", flexDirection:"column", gap:"0.5rem" }}>
-                {allSlots.map((slot, i) => {
-                  const key = `${slot.role}-${slot.team}`;
-                  const taken = takenSlots.includes(key);
-                  const selected = mySlotKey === key;
-                  const takenBy = lobbyPlayers.find(p => p.role===slot.role && p.team===slot.team && p.name!=="HOST" && p.name!=="__OBSERVER__");
-                  return (
-                    <button key={i} disabled={taken} onClick={()=>setRole(slot)}
-                      style={{
-                        padding:"0.8rem 1rem", borderRadius:"2px", cursor:taken?"not-allowed":"pointer",
-                        background: selected?"rgba(240,236,226,0.12)":taken?"rgba(240,236,226,0.02)":"rgba(240,236,226,0.05)",
-                        border:`1px solid ${selected?"rgba(240,236,226,0.5)":taken?"rgba(240,236,226,0.06)":"rgba(240,236,226,0.15)"}`,
-                        display:"flex", alignItems:"center", gap:"0.8rem", opacity:taken?0.4:1,
-                        transition:"all 0.15s", color:"var(--paper)",
-                      }}>
-                      <div style={{ width:8, height:8, borderRadius:"50%", background:taken?"var(--red-light)":selected?"var(--green-light)":"var(--muted)", flexShrink:0 }}/>
-                      <div style={{ flex:1, textAlign:"left" }}>
-                        <div style={{ display:"flex", alignItems:"center", gap:"0.4rem" }}>
-                          {roomInfo?.mode==="4P" && <span style={{ background:slot.team===1?"var(--team1)":"var(--team2)", color:"white", fontFamily:"Bebas Neue", fontSize:"0.6rem", padding:"0 0.3rem", borderRadius:"1px" }}>E{slot.team}</span>}
-                          <span style={{ fontFamily:"Bebas Neue", fontSize:"0.95rem", letterSpacing:"0.1em" }}>Suspect {slot.role}</span>
-                        </div>
-                        <div style={{ fontSize:"0.6rem", color:taken?"var(--red-light)":"var(--muted)", marginTop:"0.1rem" }}>
-                          {taken ? `Pris par ${takenBy?.name||"quelqu'un"}` : slot.role==="A"?"Témoigne en premier":"S'isole pendant A"}
-                        </div>
-                      </div>
-                      {selected && <span style={{ color:"var(--green-light)", fontSize:"0.8rem" }}>✓</span>}
-                    </button>
-                  );
-                })}
+            <div style={{ marginBottom:"2rem", marginTop:"1.5rem" }}>
+              <div className="field-label" style={{ marginBottom:"0.6rem" }}>Votre prénom</div>
+              <input className="field"
+                placeholder="Entrez votre prénom..."
+                value={name}
+                onChange={e=>setName(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&confirmName()}
+                autoFocus/>
+              <div style={{ marginTop:"0.5rem", fontSize:"0.6rem", color:"var(--muted)" }}>
+                Le HOST attribuera les rôles au hasard avant de lancer.
               </div>
             </div>
-
             {error && <div style={{ marginBottom:"1rem", color:"var(--red-light)", fontSize:"0.7rem" }}>⚠ {error}</div>}
-
             <button className="btn btn-primary" style={{ width:"100%" }}
-              disabled={!role||!name.trim()||joining}
-              onClick={confirmRole}>
+              disabled={!name.trim()||joining} onClick={confirmName}>
               {joining ? <span className="loading-dots">CONNEXION</span> : "REJOINDRE →"}
             </button>
           </div>
         )}
 
-        {/* ÉTAPE 3 : Attente du HOST */}
+        {/* ÉTAPE 3 : Attente */}
         {step === "waiting" && (
           <div style={{ textAlign:"center", animation:"fadeUp 0.4s ease" }}>
             <div style={{ fontSize:"4rem", marginBottom:"1rem" }}>⏳</div>
-            <div className="title-display" style={{ fontSize:"2rem", marginBottom:"1rem" }}>EN ATTENTE</div>
-            <div style={{ marginBottom:"0.5rem" }}>
-              <span style={{ fontFamily:"Bebas Neue", fontSize:"1.4rem", color:"var(--gold-light)" }}>
-                {name}
-              </span>
-            </div>
+            <div className="title-display" style={{ fontSize:"2rem", marginBottom:"0.5rem" }}>EN ATTENTE</div>
+            <div style={{ fontFamily:"Bebas Neue", fontSize:"1.4rem", color:"var(--gold-light)", marginBottom:"0.5rem" }}>{name}</div>
             <div style={{ fontSize:"0.7rem", color:"var(--muted)", marginBottom:"2rem" }}>
-              Suspect {role?.role}{roomInfo?.mode==="4P"?` — Équipe ${role?.team}`:""} · Salle {code.toUpperCase()}
+              Salle {code.toUpperCase()} · Le HOST attribue les rôles
             </div>
-
-            {/* Joueurs connectés */}
-            <div style={{ background:"rgba(240,236,226,0.05)", border:"1px solid rgba(240,236,226,0.1)", borderRadius:"2px", padding:"1rem", marginBottom:"1.5rem" }}>
+            <div style={{ background:"rgba(240,236,226,0.05)", border:"1px solid rgba(240,236,226,0.1)", borderRadius:"2px", padding:"1rem", marginBottom:"1rem" }}>
               <div style={{ fontSize:"0.55rem", letterSpacing:"0.2em", color:"var(--muted)", marginBottom:"0.8rem" }}>DANS LA SALLE</div>
-              {lobbyPlayers
-                .filter(p=>p.name!=="HOST"&&p.name!=="__OBSERVER__")
-                .map((p,i)=>(
+              {lobbyPlayers.length === 0
+                ? <div style={{ fontSize:"0.65rem", color:"var(--muted)" }}>Chargement<span className="loading-dots"/></div>
+                : lobbyPlayers.map((p,i) => (
                   <div key={i} style={{ display:"flex", alignItems:"center", gap:"0.6rem", padding:"0.3rem 0", fontSize:"0.75rem" }}>
                     <div style={{ width:6, height:6, borderRadius:"50%", background:"var(--green-light)", boxShadow:"0 0 4px rgba(46,204,113,0.6)" }}/>
-                    <span style={{ fontFamily:"Bebas Neue", fontSize:"0.8rem" }}>Suspect {p.role}</span>
-                    <span style={{ color:"var(--muted)", fontSize:"0.7rem" }}>{p.name}</span>
+                    <span>{p.name}</span>
                   </div>
                 ))}
-              {lobbyPlayers.filter(p=>p.name!=="HOST"&&p.name!=="__OBSERVER__").length === 0 && (
-                <div style={{ fontSize:"0.65rem", color:"var(--muted)" }}>Chargement<span className="loading-dots"/></div>
-              )}
             </div>
-
             <div className="serif" style={{ fontSize:"0.9rem", color:"rgba(240,236,226,0.5)" }}>
               Le HOST lance la partie depuis son écran.
             </div>
@@ -858,9 +842,9 @@ function LobbyJoin({ game, onBack }) {
   );
 }
 
-// LobbyScreen — routeur entre les 3 vues
+// Routeur lobby
 function LobbyScreen({ game }) {
-  const [view, setView] = useState("home"); // "home" | "host" | "join"
+  const [view, setView] = useState("home");
   if (view === "host") return <LobbyHost game={game} onBack={()=>setView("home")}/>;
   if (view === "join") return <LobbyJoin game={game} onBack={()=>setView("home")}/>;
   return <LobbyHome game={game} onHost={()=>setView("host")} onJoin={()=>setView("join")}/>;
