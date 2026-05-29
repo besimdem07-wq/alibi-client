@@ -130,18 +130,36 @@ function useSpeech() {
   const speak = useCallback((text, opts={}) => {
     if (!supported) return Promise.resolve();
     synthRef.current.cancel();
+    // Améliore la naturalité : ajoute des micro-pauses aux virgules et points
+    const naturalText = text
+      .replace(/\.\.\./g, "… ")
+      .replace(/([!?])\s/g, "$1  ");
     return new Promise(res => {
       setTimeout(() => {
-        const u = new SpeechSynthesisUtterance(text);
-        const voice = getBestVoice(); if (voice) u.voice = voice;
-        u.lang="fr-FR"; u.rate=opts.rate??0.82; u.pitch=opts.pitch??0.85; u.volume=opts.volume??1;
-        u.onstart=()=>setSpeaking(true);
-        u.onend=()=>{setSpeaking(false);res()};
-        u.onerror=()=>{setSpeaking(false);res()};
+        const u = new SpeechSynthesisUtterance(naturalText);
+        const voices = synthRef.current.getVoices();
+        // Priorité aux voix FR de haute qualité (Google FR, Apple Thomas)
+        const preferred = voices.find(v =>
+          v.lang.startsWith("fr") && (
+            v.name.includes("Google") ||
+            v.name.includes("Thomas") ||
+            v.name.includes("Amelie") ||
+            v.name.includes("Marie")
+          )
+        ) || voices.find(v => v.lang.startsWith("fr")) || voices[0];
+        if (preferred) u.voice = preferred;
+        u.lang = "fr-FR";
+        // Paramètres optimisés pour plus de naturel
+        u.rate   = opts.rate  ?? 0.88;  // légèrement plus rapide = plus naturel
+        u.pitch  = opts.pitch ?? 0.92;  // moins grave = moins robotique
+        u.volume = opts.volume ?? 1;
+        u.onstart = () => setSpeaking(true);
+        u.onend   = () => { setSpeaking(false); res(); };
+        u.onerror = () => { setSpeaking(false); res(); };
         synthRef.current.speak(u);
       }, 80);
     });
-  }, [supported, getBestVoice]);
+  }, [supported]);
   const stop = useCallback(() => { synthRef.current?.cancel(); setSpeaking(false); }, []);
   useEffect(() => {
     if (!supported) return;
@@ -858,12 +876,8 @@ function BriefingScreen({ game }) {
   const loading = !round?.scenario;
   const error = game.connError;
 
-  useEffect(() => {
-    if (round?.scenario && !spoken && speech.supported) {
-      setSpoken(true);
-      speech.speak(`Attention équipe ${game.activeTeam} ! ${round.scenario.accusation_dramatique}`, { rate:0.75, pitch:0.8 });
-    }
-  }, [round?.scenario]);
+  // Pas d'auto-lecture — le joueur choisit quand écouter
+  useEffect(() => { setSpoken(false); }, [round?.scenario?.accusation]); // reset si nouveau scénario
 
   if (loading) return (
     <div className="screen">
@@ -979,13 +993,7 @@ function InterrogationScreen({ game, role }) {
 
   useEffect(() => { setQuestionSpoken(false); stt.reset(); }, [currentQ]);
 
-  useEffect(() => {
-    if (!questionSpoken && question && speech.supported) {
-      setQuestionSpoken(true);
-      const prefix = currentQ===0 ? `${player?.name}, question numéro un. ` : `Question numéro ${currentQ+1}. `;
-      speech.speak(prefix + question.text, { rate:0.85, pitch:0.82 });
-    }
-  }, [questionSpoken, question]);
+  // Lecture manuelle — bouton ÉCOUTER dans la question card
 
   const handleNext = async () => {
     const answer = stt.transcript.trim() || "(pas de réponse)";
@@ -1129,9 +1137,7 @@ function IsolationScreen({ game }) {
   const playerA = teamPlayers.find(p=>p.role==="A");
   const playerB = teamPlayers.find(p=>p.role==="B");
 
-  useEffect(() => {
-    speech.speak(`Bien. ${playerA?.name} a témoigné. ${playerB?.name}, veuillez vous isoler et mettre votre casque. Ne regardez pas l'écran.`, { rate:0.82, pitch:0.8 });
-  }, []);
+  // Lecture manuelle via bouton RÉPÉTER ci-dessous
 
   return (
     <div className="screen">
@@ -1172,10 +1178,7 @@ function ConfrontationScreen({ game }) {
   const allDone = step > totalQ;
   const penalties = Object.values(round?.judgments||{}).filter(j=>!j.isMatching).length;
 
-  useEffect(() => {
-    if (step===0) speech.speak(`${game.mode==="4P"?"Équipe "+game.activeTeam+", phase de confrontation. ":""}Les suspects sont réunis. Examinons leurs déclarations.`, { rate:0.78, pitch:0.78 });
-    else if (currentQ && !judgment) speech.speak(`Question numéro ${step}. ${currentQ.text}`, { rate:0.82, pitch:0.82 });
-  }, [step]);
+  // Lectures manuelles via boutons — pas d'auto-lecture
 
   const readAnswer = (role, text) => {
     speech.stop();
