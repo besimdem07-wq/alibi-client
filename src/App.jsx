@@ -301,8 +301,13 @@ function useGameSocket() {
       setGameState(prev => ({ ...prev, toast: { msg:`${name} s'est déconnecté·e`, type:"warn", ts:Date.now() } })));
 
     // Lobby temps réel — liste joueurs connectés
-    socket.on("lobby:update", ({ players, mode }) =>
-      setGameState(prev => ({ ...prev, lobbyPlayers: players, mode })));
+    socket.on("lobby:update", ({ players, mode }) => {
+      // Filtrer les joueurs temporaires/internes
+      const real = players.filter(p =>
+        p.name && p.name !== "HOST" && p.name !== "__OBSERVER__" && p.name !== "__PENDING__"
+      );
+      setGameState(prev => ({ ...prev, lobbyPlayers: real, mode }));
+    });
 
     // Jugements
     socket.on("judge:thinking", ({ questionId }) =>
@@ -547,8 +552,9 @@ function LobbyHost({ game, onBack }) {
   const count = mode === "4P" ? 4 : 2;
   // Tous les joueurs connectés (sauf HOST/OBSERVER internes)
   const arrivedNames = (game.lobbyPlayers || [])
-    .filter(p => p.name !== "HOST" && p.name !== "__OBSERVER__")
-    .map(p => p.name);
+    .filter(p => p.name !== "HOST" && p.name !== "__OBSERVER__" && p.name !== "__PENDING__" && p.name)
+    .map(p => p.name)
+    .filter((n, i, arr) => arr.indexOf(n) === i); // dédupliquer
   const ready = arrivedNames.length === count;
 
   // Créer la room au montage
@@ -722,7 +728,7 @@ function LobbyJoin({ game, onBack }) {
   const [error, setError] = useState("");
   const [roomInfo, setRoomInfo] = useState(null);
 
-  const lobbyPlayers = (game.lobbyPlayers || []).filter(p => p.name !== "HOST" && p.name !== "__OBSERVER__");
+  const lobbyPlayers = (game.lobbyPlayers || []);
 
   // Vérifier le code
   const checkCode = async () => {
@@ -734,7 +740,10 @@ function LobbyJoin({ game, onBack }) {
       const info = await res.json();
       setRoomInfo(info);
       // Rejoindre en spectateur pour recevoir les lobby:update
-      await game.joinRoom({ roomId:code.trim().toUpperCase(), playerName:"__OBSERVER__", role:"B", team:1, clientRole:"SPECTATOR" });
+      // Rejoindre sans slot fixe — juste pour recevoir les lobby:update
+      // On utilise team:99 pour signaler un joueur "en attente de rôle"
+      const tmpRole = Math.random() > 0.5 ? "A" : "B";
+      await game.joinRoom({ roomId:code.trim().toUpperCase(), playerName:"__PENDING__", role:tmpRole, team:99, clientRole:"SPECTATOR" });
       setStep("name");
     } catch { setError("Impossible de vérifier le code."); }
   };
@@ -747,7 +756,9 @@ function LobbyJoin({ game, onBack }) {
     try {
       const roomId = code.trim().toUpperCase();
       // Rejoindre avec un rôle temporaire "B" — le HOST réassignera les rôles au lancement
-      await game.joinRoom({ roomId, playerName:name.trim(), role:"B", team:1, clientRole:"PLAYER_B" });
+      // Rejoindre avec le nom mais toujours en attente de rôle (team:99)
+      // Le HOST réassignera les rôles au lancement
+      await game.joinRoom({ roomId, playerName:name.trim(), role:"B", team:99, clientRole:"PLAYER_B" });
       game.patch({ roomId });
       setStep("waiting");
     } catch(e) { setError(e.message); }
